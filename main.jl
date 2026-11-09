@@ -1,8 +1,10 @@
 using Random
 using Sockets
 using CRC32c
+include("AES.jl")
 include("ChaCha20.jl")
 include("ffdhe.jl")
+include("SHA-512.jl")
 
 p = ffdhe8192
 g = 2
@@ -26,7 +28,8 @@ function bigint_to_bytes(x::BigInt, n::Int)
 end
 
 function decrypt(ciphertext :: Vector{UInt8}, key :: BigInt)
-	local plaintext = Vector{UInt8}()
+	plaintext = Vector{UInt8}()
+	key = sha512(key)
 
     for i in 1:64:length(ciphertext)
         block = ciphertext[i:i+64-1]
@@ -34,7 +37,7 @@ function decrypt(ciphertext :: Vector{UInt8}, key :: BigInt)
 		plainchar = cipherchar ⊻ key
 		data = bigint_to_bytes(plainchar, 64)
         append!(plaintext, data)
-		key = ChaCha20(key)
+		key = sha512(key)
     end
 
     # Remove PKCS#7 padding
@@ -53,6 +56,7 @@ end
 
 function encrypt(plaintext :: String, key :: BigInt)
 	plaintext = collect(codeunits(plaintext))
+	key = sha512(key)
 
     # PKCS#7 padding
     pad = 64 - mod(length(plaintext), 64)
@@ -67,7 +71,7 @@ function encrypt(plaintext :: String, key :: BigInt)
 		cipherchar = plainchar ⊻ key
 		data = bigint_to_bytes(cipherchar, 64)
         append!(ciphertext, data)
-		key = ChaCha20(key)
+		key = sha512(key)
     end
 
 	ciphertext
@@ -84,8 +88,13 @@ function chat(sock, key, isclient)
 		local index = 1
 		try
 			while true
-				local data = readline(sock)
-				local plaintext = decrypt(hex2bytes(data), key+clientoffset+index)
+				data = readline(sock)
+				plainmessage = decrypt(hex2bytes(data), key+clientoffset+index)
+				hash,plaintext = split(plainmessage, ' ', limit=2)
+				hash = parse(BigInt, hash)
+				if sha512(string(plaintext)) != hash
+					error("Tamper detected!")
+				end
 				println(plaintext)
 				index += 1
 			end
@@ -101,7 +110,8 @@ function chat(sock, key, isclient)
 		while true
 			try
 				local plaintext = readline()
-				local data = encrypt(plaintext, key + serveroffset + index)
+				local plainmessage = string(sha512(plaintext)) * ' ' * plaintext
+				local data = encrypt(plainmessage, key + serveroffset + index)
 				write(sock, bytes2hex(data) * '\n')
 				index += 1
 			catch e
@@ -137,7 +147,7 @@ if length(ARGS) == 0
 		println("secret ", s % 1_000_000)
 
 		# calculate key
-		key = mod(s, big(2)^256)
+		key = mod(s, big(2)^512)
 
 		# chat HIER
 		chat(sock, key, false)
@@ -168,7 +178,7 @@ if length(ARGS) > 0
 		println("secret ", s % 1_000_000)
 
 		# calculate key
-		key = mod(s, big(2)^256)
+		key = mod(s, big(2)^512)
 
 		# chat
 		chat(sock, key, true)

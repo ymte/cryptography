@@ -150,6 +150,10 @@ function encrypt(plaintext::AbstractVector{UInt8},
     return ciphertext
 end
 
+#key = Vector{UInt8}(undef, 32)
+#blocks = encrypt(collect(codeunits("12345678901234561234567890123456")), key)
+#@assert blocks[1:16] != blocks[17:32]
+
 function encrypt(plaintext::String, key::BigInt)
 	key = bigint_to_bytes(key, 32)
 	plaintext = collect(codeunits(plaintext))
