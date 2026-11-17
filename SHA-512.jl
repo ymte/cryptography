@@ -150,17 +150,3 @@ function sha512(message::Vector{UInt8})
 
     return output
 end
-
-# Convenience function for strings
-#sha512(message::String) = parse(BigInt,"0x"*bytes2hex(sha512(collect(codeunits(message)))))
-
-function sha512(int :: BigInt)
-	bytes = bigint_to_bytes(int, 64)
-	sha512(bytes)
-end
-
-#function sha512(int :: BigInt)
-#	bytes = bigint_to_bytes(int, 64)
-#	next = sha512(bytes)
-#	parse(BigInt, "0x" * bytes2hex(next))
-#end

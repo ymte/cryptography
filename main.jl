@@ -1,26 +1,16 @@
 using Random
 using Sockets
 using CRC32c
-include("AES.jl")
-include("ChaCha20.jl")
+using SHA
 include("ffdhe.jl")
-include("SHA-512.jl")
 
-function bigint_to_bytes(x::BigInt, n::Int)
-    x >= 0 || throw(ArgumentError("Negative integers not supported"))
-    n >= 0 || throw(ArgumentError("Width must be non-negative"))
-
-    x < (BigInt(1) << (8*n)) ||
-        throw(ArgumentError("Integer does not fit in $n bytes"))
-
-    bytes = Vector{UInt8}(undef, n)
-
-    for i in n:-1:1
-        bytes[i] = UInt8(x & 0xff)
-        x >>= 8
-    end
-
-    return bytes
+function sha512_bigint(int :: BigInt)
+	bytes = Vector{UInt8}()
+	for i=1:64
+		append!(bytes, int % 256)
+		int %= 256
+	end
+	sha512(String(bytes))
 end
 
 function unpad(padded)
@@ -44,16 +34,19 @@ function pad(plaintext)
 	return padded
 end
 
+@assert unpad(pad([1,2,3])) == [1,2,3]
+@assert length(pad([1,2,3])) == 64
+
+
 function decrypt(ciphertext :: Vector{UInt8}, key :: BigInt)
 	plaintext = Vector{UInt8}()
 
     for i in 1:64:length(ciphertext)
         block = ciphertext[i:i+64-1]
-		data = block .⊻ sha512(key + i)
+		data = block .⊻ sha512_bigint(key + i)
         append!(plaintext, data)
     end
 
-    # Remove PKCS#7 padding
 	plaintext = unpad(plaintext)
 	String(plaintext)
 end
@@ -65,7 +58,7 @@ function encrypt(plaintext :: String, key :: BigInt)
 
     for i in 1:64:length(plaintext)
         block = plaintext[i:i+64-1]
-		data = block .⊻ sha512(key+i)
+		data = block .⊻ sha512_bigint(key+i)
         append!(ciphertext, data)
     end
 
@@ -73,51 +66,6 @@ function encrypt(plaintext :: String, key :: BigInt)
 end
 
 @assert decrypt(encrypt("hoi", big(3)), big(3)) == "hoi"
-
-
-# chat
-function chat(sock, key, isclient)
-	local clientoffset = isclient ? 1_000_000 : 0
-	local serveroffset = isclient ? 0 : 1_000_000
-
-	# receive
-	@async begin
-		local index = 1
-		try
-			while true
-				data = readline(sock)
-				plainmessage = decrypt(hex2bytes(data), key+clientoffset+index)
-				hash,plaintext = split(plainmessage, ' ', limit=2)
-				hash = parse(BigInt, hash)
-				if crc32c(string(plaintext)) != hash
-					error("Tamper detected!")
-				end
-				println(plaintext)
-				index += 1
-			end
-		catch e
-			# println(e)
-			exit()
-		end
-	end
-
-	# send
-	@async begin
-		local index = 1
-		while true
-			try
-				local plaintext = readline()
-				local plainmessage = string(crc32c(plaintext)) * ' ' * plaintext
-				local data = encrypt(plainmessage, key + serveroffset + index)
-				write(sock, bytes2hex(data) * '\n')
-				index += 1
-			catch e
-				# println(e)
-				exit()
-			end
-		end
-	end
-end
 
 function kex(socket, a)
 	g = 2
@@ -127,7 +75,7 @@ function kex(socket, a)
 	A = powermod(g, a, p)
 
 	# send A
-	write(socket, string(A)*'\n')
+	write(socket, string(A) * '\n')
 
 	# receive B
 	B = parse(BigInt, readline(socket))
@@ -139,45 +87,71 @@ function kex(socket, a)
 end
 
 # server
+global isclient
+global socket
 if length(ARGS) == 0
-	errormonitor(@async begin
-		println("listening...")
-		server = listen(IPv6(0),2000)
-		socket = accept(server)
-		println("accepted")
-
-		rng = RandomDevice()
-		a = rand(rng, big(1):big(2)^400)
-		s = kex(socket, a)
-		println("secret ", s % 1_000_000)
-
-		# calculate key
-		key = mod(s, big(2)^512)
-
-		# chat
-		chat(socket, key, false)
-	end)
+	isclient = false
+	println("listening...")
+	server = listen(IPv6(0),2000)
+	socket = accept(server)
+	println("accepted")
+else
+	isclient = true
+	println("connecting...")
+	socket = connect(ARGS[1], 2000)
+	println("connected")
 end
 
-# client
-if length(ARGS) > 0
-	errormonitor(@async begin
-		println("connecting...")
-		socket = connect(ARGS[1], 2000)
-		println("connected")
+device = RandomDevice()
+a = rand(device, big(1):big(2)^400)
+secret = kex(socket, a)
+println("secret ", secret % 1_000_000_000)
 
-		rng = RandomDevice()
-		b = rand(rng, big(1):big(2)^400)
-		s = kex(socket, b)
-		println("secret ", s % 1_000_000)
+# calculate key
+key = mod(secret, big(2)^512)
 
-		# calculate key
-		key = mod(s, big(2)^512)
+# chat
+clientoffset = isclient ? 1_000_000_000 : 0
+serveroffset = isclient ? 0 : 1_000_000_000
 
-		# chat
-		chat(socket, key, true)
+# receive
+@async begin
+	index = 1
+	try
+		while true
+			hex = readline(socket)
+			if hex == ""
+				println("disconnected")
+				exit()
+			end
+			data = hex2bytes(hex)
+			message = decrypt(data, key + clientoffset + index)
+			hash,plaintext = split(message, ' ', limit=2)
+			hash = parse(Int, hash)
+			@assert crc32c(string(plaintext)) == hash
+			println(plaintext)
+			index += 1
+		end
+	catch
+		println("protocol error")
+		exit()
+	end
+end
 
-	end)
+# send
+@async begin
+	index = 1
+	while true
+		plaintext = readline()
+		if plaintext == ""
+			exit()
+		end
+		message = string(crc32c(plaintext)) * ' ' * plaintext
+		data = encrypt(message, key + serveroffset + index)
+		hex = bytes2hex(data)
+		write(socket, hex * '\n')
+		index += 1
+	end
 end
 
 sleep(1e10)
