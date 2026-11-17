@@ -6,10 +6,6 @@ include("ChaCha20.jl")
 include("ffdhe.jl")
 include("SHA-512.jl")
 
-p = ffdhe8192
-g = 2
-port = 2000
-
 function bigint_to_bytes(x::BigInt, n::Int)
     x >= 0 || throw(ArgumentError("Negative integers not supported"))
     n >= 0 || throw(ArgumentError("Width must be non-negative"))
@@ -27,55 +23,56 @@ function bigint_to_bytes(x::BigInt, n::Int)
     return bytes
 end
 
-function decrypt(ciphertext :: Vector{UInt8}, key :: BigInt)
-	plaintext = Vector{UInt8}()
-	key = sha512(key)
-
-    for i in 1:64:length(ciphertext)
-        block = ciphertext[i:i+64-1]
-		cipherchar = parse(BigInt, "0x"*bytes2hex(block))
-		plainchar = cipherchar ⊻ key
-		data = bigint_to_bytes(plainchar, 64)
-        append!(plaintext, data)
-		key = sha512(key)
-    end
-
-    # Remove PKCS#7 padding
-    pad = Int(plaintext[end])
+function unpad(padded)
+	padded = copy(padded)
+    pad = Int(padded[end])
 
     1 <= pad <= 64 ||
         throw(ArgumentError("Invalid padding"))
 
-    all(==(UInt8(pad)), plaintext[end-pad+1:end]) ||
+    all(==(UInt8(pad)), padded[end-pad+1:end]) ||
         throw(ArgumentError("Invalid padding"))
 
-    resize!(plaintext, length(plaintext)-pad)
+    resize!(padded, length(padded)-pad)
+	return padded
+end
 
+function pad(plaintext)
+    pad = 64 - mod(length(plaintext), 64)
+    padded = vcat(Vector{UInt8}(plaintext),
+                fill(UInt8(pad), pad))
+	return padded
+end
+
+function decrypt(ciphertext :: Vector{UInt8}, key :: BigInt)
+	plaintext = Vector{UInt8}()
+
+    for i in 1:64:length(ciphertext)
+        block = ciphertext[i:i+64-1]
+		data = block .⊻ sha512(key + i)
+        append!(plaintext, data)
+    end
+
+    # Remove PKCS#7 padding
+	plaintext = unpad(plaintext)
 	String(plaintext)
 end
 
 function encrypt(plaintext :: String, key :: BigInt)
-	plaintext = collect(codeunits(plaintext))
-	key = sha512(key)
-
-    # PKCS#7 padding
-    pad = 64 - mod(length(plaintext), 64)
-    plaintext = vcat(Vector{UInt8}(plaintext),
-                fill(UInt8(pad), pad))
+	plaintext = pad(collect(codeunits(plaintext)))
 
     ciphertext = UInt8[]
 
     for i in 1:64:length(plaintext)
         block = plaintext[i:i+64-1]
-		plainchar = parse(BigInt, "0x"*bytes2hex(block))
-		cipherchar = plainchar ⊻ key
-		data = bigint_to_bytes(cipherchar, 64)
+		data = block .⊻ sha512(key+i)
         append!(ciphertext, data)
-		key = sha512(key)
     end
 
 	ciphertext
 end
+
+@assert decrypt(encrypt("hoi", big(3)), big(3)) == "hoi"
 
 
 # chat
@@ -92,14 +89,14 @@ function chat(sock, key, isclient)
 				plainmessage = decrypt(hex2bytes(data), key+clientoffset+index)
 				hash,plaintext = split(plainmessage, ' ', limit=2)
 				hash = parse(BigInt, hash)
-				if sha512(string(plaintext)) != hash
+				if crc32c(string(plaintext)) != hash
 					error("Tamper detected!")
 				end
 				println(plaintext)
 				index += 1
 			end
 		catch e
-			println(e)
+			# println(e)
 			exit()
 		end
 	end
@@ -110,78 +107,75 @@ function chat(sock, key, isclient)
 		while true
 			try
 				local plaintext = readline()
-				local plainmessage = string(sha512(plaintext)) * ' ' * plaintext
+				local plainmessage = string(crc32c(plaintext)) * ' ' * plaintext
 				local data = encrypt(plainmessage, key + serveroffset + index)
 				write(sock, bytes2hex(data) * '\n')
 				index += 1
 			catch e
-				println(e)
+				# println(e)
 				exit()
 			end
 		end
 	end
 end
 
+function kex(socket, a)
+	g = 2
+	p = ffdhe8192
+
+	# g^a % p
+	A = powermod(g, a, p)
+
+	# send A
+	write(socket, string(A)*'\n')
+
+	# receive B
+	B = parse(BigInt, readline(socket))
+
+	# calculate shared secret
+	s = powermod(B, a, p)
+
+	return s
+end
+
 # server
 if length(ARGS) == 0
 	errormonitor(@async begin
-		rng = RandomDevice()
-		a = rand(rng, big(1):big(2)^400)
-
-		# g^a mod p
-		A = powermod(g, a, p)
-
 		println("listening...")
-		server = listen(IPv6(0),port)
-		sock = accept(server)
+		server = listen(IPv6(0),2000)
+		socket = accept(server)
 		println("accepted")
 
-		# send A
-		write(sock, string(A)*'\n')
-
-		# receive B
-		B = parse(BigInt, readline(sock))
-
-		# calculate shared secret
-		s = powermod(B, a, p)
-		println("secret ", s % 1_000_000)
-
-		# calculate key
-		key = mod(s, big(2)^512)
-
-		# chat HIER
-		chat(sock, key, false)
-	end)
-end
-
-# client
-if length(ARGS) > 0
-	errormonitor(@async begin
 		rng = RandomDevice()
-		b = rand(rng, big(1):big(2)^400)
-
-		# g^b mod p
-		B = powermod(g, b, p)
-
-		println("connecting...")
-		sock = connect(ARGS[1], port)
-		println("connected")
-
-		# send B
-		write(sock, string(B)*'\n')
-
-		# receive A
-		A = parse(BigInt, readline(sock))
-
-		# calculate shared secret
-		s = powermod(A, b, p)
+		a = rand(rng, big(1):big(2)^400)
+		s = kex(socket, a)
 		println("secret ", s % 1_000_000)
 
 		# calculate key
 		key = mod(s, big(2)^512)
 
 		# chat
-		chat(sock, key, true)
+		chat(socket, key, false)
+	end)
+end
+
+# client
+if length(ARGS) > 0
+	errormonitor(@async begin
+		println("connecting...")
+		socket = connect(ARGS[1], 2000)
+		println("connected")
+
+		rng = RandomDevice()
+		b = rand(rng, big(1):big(2)^400)
+		s = kex(socket, b)
+		println("secret ", s % 1_000_000)
+
+		# calculate key
+		key = mod(s, big(2)^512)
+
+		# chat
+		chat(socket, key, true)
 
 	end)
 end
