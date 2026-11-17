@@ -4,13 +4,13 @@ using CRC32c
 using SHA
 include("ffdhe.jl")
 
-function sha512_bigint(int :: BigInt)
-	bytes = Vector{UInt8}()
-	for i=1:64
-		append!(bytes, int % 256)
-		int %= 256
-	end
-	sha512(String(bytes))
+function sha512_bigint(int::BigInt)
+    bytes = Vector{UInt8}()
+    for i=1:64
+        push!(bytes, UInt8(int % 256))
+        int ÷= 256
+    end
+    sha512(bytes)
 end
 
 function unpad(padded)
@@ -67,7 +67,10 @@ end
 
 @assert decrypt(encrypt("hoi", big(3)), big(3)) == "hoi"
 
-function kex(socket, a)
+function kex(socket)
+	device = RandomDevice()
+	a = rand(device, big(1):big(2)^512)
+
 	g = 2
 	p = ffdhe8192
 
@@ -86,6 +89,25 @@ function kex(socket, a)
 	return s
 end
 
+function decode(hex, key)
+	data = hex2bytes(hex)
+	message = decrypt(data, key)
+	hash,plaintext = split(message, ' ', limit=2)
+	hash = parse(Int, hash)
+	@assert crc32c(string(plaintext)) == hash
+	return plaintext
+end
+	
+function encode(plaintext, key)
+	message = string(crc32c(plaintext)) * ' ' * plaintext
+	data = encrypt(message, key)
+	hex = bytes2hex(data)
+	return hex
+end
+
+@assert decode(encode("hoi", big(3)), big(3)) == "hoi"
+
+
 # server
 global isclient
 global socket
@@ -102,17 +124,15 @@ else
 	println("connected")
 end
 
-device = RandomDevice()
-a = rand(device, big(1):big(2)^400)
-secret = kex(socket, a)
+secret = kex(socket)
 println("secret ", secret % 1_000_000_000)
 
 # calculate key
-key = mod(secret, big(2)^512)
+key = secret % big(2)^512
 
 # chat
-clientoffset = isclient ? 1_000_000_000 : 0
-serveroffset = isclient ? 0 : 1_000_000_000
+clientoffset =  isclient ? 0 : 1_000_000_000
+serveroffset = !isclient ? 0 : 1_000_000_000
 
 # receive
 @async begin
@@ -124,11 +144,7 @@ serveroffset = isclient ? 0 : 1_000_000_000
 				println("disconnected")
 				exit()
 			end
-			data = hex2bytes(hex)
-			message = decrypt(data, key + clientoffset + index)
-			hash,plaintext = split(message, ' ', limit=2)
-			hash = parse(Int, hash)
-			@assert crc32c(string(plaintext)) == hash
+			plaintext = decode(hex, key + clientoffset + index)
 			println(plaintext)
 			index += 1
 		end
@@ -146,10 +162,8 @@ end
 		if plaintext == ""
 			exit()
 		end
-		message = string(crc32c(plaintext)) * ' ' * plaintext
-		data = encrypt(message, key + serveroffset + index)
-		hex = bytes2hex(data)
-		write(socket, hex * '\n')
+		hex = encode(plaintext, key + serveroffset + index)
+		println(socket, hex)
 		index += 1
 	end
 end
