@@ -1,0 +1,13 @@
+[package]
+name = "secure-chat"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+num-bigint = { version = "0.4", features = ["rand"] }
+num-traits = "0.2"
+rand = "0.8"
+sha2 = "0.10"
+crc32c = "0.6"
+hex = "0.4"
+tokio = { version = "1", features = ["full"] }
